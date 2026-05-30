@@ -92,7 +92,10 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
         ),
         Span::styled(ruta, Style::default().fg(theme::TEXT)),
         Span::raw("   "),
-        Span::styled(format!("[tamaño: {modo}]"), Style::default().fg(theme::ACCENT)),
+        Span::styled(
+            format!("[tamaño: {modo}]"),
+            Style::default().fg(theme::ACCENT),
+        ),
         Span::raw(" "),
         Span::styled(
             format!("[orden: {}]", app.sort.label()),

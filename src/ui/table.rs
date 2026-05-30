@@ -5,14 +5,14 @@
 //! fila seleccionada se resalta y se sincroniza con `App::selected`.
 
 use ratatui::layout::{Constraint, Rect};
-use ratatui::style::{Modifier, Style};
+use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::Text;
 use ratatui::widgets::{Cell, Row, Table};
 use ratatui::Frame;
 
 use super::theme;
 use crate::app::App;
-use crate::util::{format_count, format_size};
+use crate::util::{format_count, format_size, palette_rgb};
 
 // Colores de las celdas (truecolor, en armonía con el tema btop-like).
 // REVISAR (contraste): la fila seleccionada se pinta con texto oscuro sobre un
@@ -54,13 +54,17 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
             let pct = node.size as f64 / total_dir as f64 * 100.0;
 
             // Colores: en la fila seleccionada todo va en negro (lo aporta el
-            // estilo de fila); en el resto, cada columna lleva su color propio.
+            // estilo de fila). En el resto, los DIRECTORIOS usan el acento y los
+            // ARCHIVOS el color de su extensión, EXACTAMENTE el mismo que reciben
+            // en el panel "por extensión" (vía `palette_rgb`), para que el color
+            // identifique el tipo de archivo de forma consistente en toda la UI.
             let (c_nombre, c_size) = if seleccionada {
                 (SEL_FG, SEL_FG)
             } else if node.is_dir {
                 (DIR_FG, SIZE_FG)
             } else {
-                (FILE_FG, SIZE_FG)
+                let (r, g, b) = palette_rgb(node.extension.as_deref());
+                (Color::Rgb(r, g, b), SIZE_FG)
             };
 
             let fila = Row::new(vec![

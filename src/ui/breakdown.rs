@@ -42,8 +42,11 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             None => "(sin ext)".to_string(),
         };
 
-        // Barra proporcional con el color de la extensión.
-        let llenos = ((ext.size as f64 / max as f64) * ANCHO_BARRA as f64).round() as usize;
+        // Barra proporcional. El cuadradito (■) mantiene el color de la extensión
+        // (consistente con el treemap), pero la BARRA usa el gradiente btop
+        // verde→amarillo→rojo según cuánto ocupa respecto al mayor.
+        let frac = ext.size as f64 / max as f64;
+        let llenos = (frac * ANCHO_BARRA as f64).round() as usize;
         let barra: String = "█".repeat(llenos.min(ANCHO_BARRA));
 
         lineas.push(Line::from(vec![
@@ -52,14 +55,16 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             Span::raw(" "),
             Span::styled(
                 format!("{:>10}", format_size(ext.size)),
-                Style::default().add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(theme::TEXT)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(
                 format!(" ({})", format_count(ext.count)),
-                Style::default().fg(Color::Rgb(150, 150, 150)),
+                Style::default().fg(theme::DIM),
             ),
             Span::raw("  "),
-            Span::styled(barra, Style::default().fg(color)),
+            Span::styled(barra, Style::default().fg(theme::gradient(frac))),
         ]));
     }
 
