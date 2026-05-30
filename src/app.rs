@@ -6,6 +6,7 @@
 //! orden) y la capacidad de re-escanear (necesaria para `r` y para alternar el
 //! modo de tamaño con `a`, que cambia los bytes computados por archivo).
 
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 use std::time::{Duration, Instant};
 
@@ -17,6 +18,7 @@ use crate::dedup::{self, DedupMsg, DupGroup};
 use crate::model::Tree;
 use crate::scanner::{ScanConfig, ScanMsg, SizeMode};
 use crate::treemap::TileRect;
+use crate::util::format_size;
 
 /// Agregado de tamaño por extensión (para el panel de desglose).
 pub struct ExtAgg {
@@ -64,10 +66,34 @@ pub struct DeletePrompt {
     pub awaiting_second: bool,
 }
 
+/// Un elemento de la lista de marcados, preparado para el borrado por lotes.
+#[derive(Clone)]
+pub struct BatchItem {
+    pub node: usize,
+    pub path: PathBuf,
+    pub is_dir: bool,
+    pub protected: bool,
+    pub size: u64,
+}
+
+/// Datos del modal de borrado por LOTES (todos los elementos marcados).
+pub struct BatchPrompt {
+    pub items: Vec<BatchItem>,
+    pub total_size: u64,
+    /// Cuántos elementos están protegidos (se omitirán).
+    pub protegidos: usize,
+    /// ¿Hay algún directorio no vacío? (Exige segunda confirmación si es permanente.)
+    pub any_non_empty: bool,
+    /// Esperando la segunda pulsación de [X] para el borrado permanente.
+    pub awaiting_second: bool,
+}
+
 /// Modal activo sobre la interfaz (bloquea la navegación normal).
 pub enum Modal {
-    /// Confirmación de borrado (papelera / permanente / cancelar).
+    /// Confirmación de borrado de un solo elemento.
     ConfirmDelete(DeletePrompt),
+    /// Confirmación de borrado por lotes de la lista de marcados.
+    ConfirmBatch(BatchPrompt),
     /// Mensaje informativo (resultado de una acción o un error).
     Message {
         titulo: String,
@@ -207,6 +233,9 @@ pub struct App {
 
     /// Sombreado "cushion" del treemap activado (look 3D estilo WinDirStat).
     pub cushion: bool,
+
+    /// Conjunto de nodos MARCADOS (por índice) para borrarlos por lotes después.
+    pub marked: HashSet<usize>,
 }
 
 impl App {
@@ -247,6 +276,7 @@ impl App {
             dup_sel: 0,
             dup_list_state: ratatui::widgets::ListState::default(),
             cushion: false,
+            marked: HashSet::new(),
         }
     }
 
@@ -589,6 +619,143 @@ impl App {
         self.breakdown_for = None;
     }
 
+    // --- Lista de marcados (multi-selección para borrado por lotes) ---
+
+    /// ¿Está marcado el nodo `idx`?
+    pub fn is_marked(&self, idx: usize) -> bool {
+        self.marked.contains(&idx)
+    }
+
+    /// Marca o desmarca el elemento seleccionado (archivo o carpeta).
+    pub fn toggle_mark(&mut self) {
+        if let Some(node) = self.selected_node() {
+            if !self.marked.remove(&node) {
+                self.marked.insert(node);
+            }
+        }
+    }
+
+    /// Resumen de la lista de marcados: (nº de elementos, tamaño total).
+    pub fn marked_summary(&self) -> (usize, u64) {
+        let total = match self.tree() {
+            Some(tree) => self
+                .marked
+                .iter()
+                .map(|&n| tree.nodes.get(n).map(|x| x.size).unwrap_or(0))
+                .sum(),
+            None => 0,
+        };
+        (self.marked.len(), total)
+    }
+
+    /// Nodos marcados ordenados por tamaño desc (para mostrarlos en el panel).
+    pub fn marked_sorted(&self) -> Vec<usize> {
+        let Some(tree) = self.tree() else {
+            return Vec::new();
+        };
+        let mut v: Vec<usize> = self.marked.iter().copied().collect();
+        v.sort_by_key(|&n| std::cmp::Reverse(tree.nodes.get(n).map(|x| x.size).unwrap_or(0)));
+        v
+    }
+
+    /// Abre el modal de borrado por lotes de TODOS los elementos marcados.
+    pub fn open_batch_delete_modal(&mut self) {
+        if !self.scan_complete() || self.marked.is_empty() {
+            return;
+        }
+        let Some(tree) = self.tree() else { return };
+        let mut items = Vec::new();
+        let mut total = 0u64;
+        let mut protegidos = 0usize;
+        let mut any_non_empty = false;
+        for &node in &self.marked {
+            let Some(n) = tree.nodes.get(node) else {
+                continue;
+            };
+            let path = tree.path_of(node, &self.root_path);
+            let protected = actions::is_protected(&path);
+            let non_empty = n.is_dir && n.file_count > 0;
+            if protected {
+                protegidos += 1;
+            }
+            if non_empty && !protected {
+                any_non_empty = true;
+            }
+            total += n.size;
+            items.push(BatchItem {
+                node,
+                path,
+                is_dir: n.is_dir,
+                protected,
+                size: n.size,
+            });
+        }
+        self.modal = Some(Modal::ConfirmBatch(BatchPrompt {
+            items,
+            total_size: total,
+            protegidos,
+            any_non_empty,
+            awaiting_second: false,
+        }));
+    }
+
+    /// Ejecuta el borrado por lotes (papelera o permanente).
+    ///
+    /// REVISAR (borrado): borra todos los elementos marcados NO protegidos. Para
+    /// el permanente con algún directorio no vacío, exige una segunda pulsación.
+    /// Ordena por profundidad descendente (hijos antes que padres) para evitar
+    /// borrar un directorio antes que un descendiente también marcado.
+    pub fn confirm_batch(&mut self, permanent: bool) {
+        let (mut items, awaiting, any_non_empty) = match &self.modal {
+            Some(Modal::ConfirmBatch(b)) => (b.items.clone(), b.awaiting_second, b.any_non_empty),
+            _ => return,
+        };
+
+        if permanent && any_non_empty && !awaiting {
+            if let Some(Modal::ConfirmBatch(b)) = &mut self.modal {
+                b.awaiting_second = true;
+            }
+            return;
+        }
+
+        // Más profundo primero: así un hijo marcado se borra antes que su padre.
+        items.sort_by_key(|i| std::cmp::Reverse(i.path.components().count()));
+
+        let mode = if permanent {
+            DeleteMode::Permanent
+        } else {
+            DeleteMode::Trash
+        };
+        let (mut ok, mut err, mut liberado) = (0u64, 0u64, 0u64);
+        let mut protegidos = 0u64;
+        for it in &items {
+            if it.protected {
+                protegidos += 1;
+                continue;
+            }
+            match actions::delete_path(&it.path, it.is_dir, mode) {
+                Ok(()) => {
+                    self.after_delete(Some(it.node), false, &it.path);
+                    self.marked.remove(&it.node);
+                    ok += 1;
+                    liberado += it.size;
+                }
+                Err(_) => err += 1,
+            }
+        }
+
+        let titulo = if err == 0 {
+            "Marcados borrados"
+        } else {
+            "Borrado parcial"
+        };
+        let cuerpo = format!(
+            "Borrados: {ok} · liberado: {} · protegidos omitidos: {protegidos} · errores: {err}",
+            format_size(liberado)
+        );
+        self.set_message(titulo, &cuerpo, err > 0);
+    }
+
     /// Sustituye el modal por un mensaje informativo.
     fn set_message(&mut self, titulo: &str, cuerpo: &str, error: bool) {
         self.modal = Some(Modal::Message {
@@ -620,6 +787,9 @@ impl App {
             tree.nodes[p].file_count = tree.nodes[p].file_count.saturating_sub(count);
             cur = tree.nodes[p].parent;
         }
+
+        // Si el nodo borrado estaba marcado, lo quitamos de la lista.
+        self.marked.remove(&node);
 
         // La lista visible encogió: reajustamos la selección y limpiamos el hover.
         self.hover_node = None;
@@ -806,6 +976,8 @@ impl App {
         self.dedup_running = false;
         self.dup_files.clear();
         self.view = ViewMode::Main;
+        // Los índices del árbol antiguo dejan de ser válidos: limpiamos marcas.
+        self.marked.clear();
     }
 
     /// Drena los mensajes pendientes del escáner sin bloquear.

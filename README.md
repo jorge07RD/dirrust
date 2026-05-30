@@ -94,7 +94,9 @@ dirrust --cushion --threads 8 /datos
 | `Tab` | Cambiar el foco entre tabla y treemap |
 | `s` | Ciclar el criterio de orden |
 | `a` | Alternar tamaño aparente / en disco (re-escanea) |
+| `Espacio` | Marcar / desmarcar el elemento (lista de marcados) |
 | `d` | Borrar el elemento seleccionado (abre confirmación) |
+| `D` | Borrar TODOS los elementos marcados (lote) |
 | `f` | Ver la lista de duplicados |
 | `r` | Re-escanear |
 | `q`, `Ctrl-C` | Salir |

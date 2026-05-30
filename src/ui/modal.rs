@@ -10,7 +10,7 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, BorderType, Borders, Clear, Paragraph, Wrap};
 use ratatui::Frame;
 
-use crate::app::{App, DeletePrompt, Modal};
+use crate::app::{App, BatchPrompt, DeletePrompt, Modal};
 use crate::util::{format_count, format_size};
 
 /// Dibuja el modal activo, si lo hay.
@@ -18,12 +18,88 @@ pub fn draw(frame: &mut Frame, app: &App) {
     let Some(modal) = &app.modal else { return };
     match modal {
         Modal::ConfirmDelete(p) => draw_confirm(frame, p),
+        Modal::ConfirmBatch(b) => draw_batch(frame, b),
         Modal::Message {
             titulo,
             cuerpo,
             error,
         } => draw_message(frame, titulo, cuerpo, *error),
     }
+}
+
+/// Modal de confirmación de borrado por LOTES (lista de marcados).
+fn draw_batch(frame: &mut Frame, b: &BatchPrompt) {
+    let area = centrado(64, 45, frame.area());
+    frame.render_widget(Clear, area);
+
+    let borrables = b.items.len() - b.protegidos;
+    let mut lineas: Vec<Line> = vec![
+        Line::from(vec![
+            Span::styled(
+                "Elementos marcados: ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(format!("{}", b.items.len())),
+        ]),
+        Line::from(vec![
+            Span::styled(
+                "Tamaño total:       ",
+                Style::default().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format_size(b.total_size),
+                Style::default().fg(Color::Rgb(120, 230, 140)),
+            ),
+        ]),
+        Line::from(format!(
+            "Se borrarán {borrables}, se omiten {} protegidos.",
+            b.protegidos
+        )),
+        Line::from(""),
+    ];
+
+    let (color, acciones) = if b.awaiting_second {
+        lineas.push(Line::from(Span::styled(
+            "⚠  Hay directorios NO vacíos. Pulsa [X] OTRA VEZ para BORRADO PERMANENTE.",
+            Style::default()
+                .fg(Color::Rgb(255, 80, 80))
+                .add_modifier(Modifier::BOLD),
+        )));
+        lineas.push(Line::from(""));
+        (
+            Color::Rgb(255, 80, 80),
+            Line::from(vec![
+                tecla("X"),
+                Span::raw(" Confirmar permanente   "),
+                tecla("Esc"),
+                Span::raw(" Cancelar"),
+            ]),
+        )
+    } else {
+        (
+            Color::Rgb(255, 180, 60),
+            Line::from(vec![
+                tecla("P"),
+                Span::raw(" Papelera   "),
+                tecla("X"),
+                Span::raw(" Permanente   "),
+                tecla("Esc"),
+                Span::raw(" Cancelar"),
+            ]),
+        )
+    };
+    lineas.push(acciones);
+
+    let modal = Paragraph::new(lineas)
+        .block(
+            Block::default()
+                .borders(Borders::ALL)
+                .border_type(BorderType::Rounded)
+                .border_style(Style::default().fg(color))
+                .title(" Borrar marcados "),
+        )
+        .wrap(Wrap { trim: true });
+    frame.render_widget(modal, area);
 }
 
 /// Modal de confirmación de borrado.

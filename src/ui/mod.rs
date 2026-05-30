@@ -7,10 +7,14 @@
 
 mod breakdown;
 mod duplicates;
+mod marked;
 mod modal;
 mod table;
 pub mod theme;
 mod treemap_view;
+
+/// Máximo de elementos marcados que se listan en el panel (el resto se resume).
+const MARCADOS_MAX_FILAS: usize = 5;
 
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
@@ -27,18 +31,35 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // Recalcula el desglose por extensión si hace falta (cacheado por directorio).
     app.ensure_breakdown();
 
+    // El panel de marcados solo ocupa espacio si hay algo marcado: es "esbelto"
+    // y desaparece por completo cuando la lista está vacía.
+    let (n_marcados, _) = app.marked_summary();
+    let mostrar_marcados = n_marcados > 0 && app.tree().is_some();
+    let alto_marcados = if mostrar_marcados {
+        (n_marcados.min(MARCADOS_MAX_FILAS) as u16) + 2 // + bordes
+    } else {
+        0
+    };
+
+    let mut restricciones = vec![Constraint::Length(3), Constraint::Min(1)];
+    if mostrar_marcados {
+        restricciones.push(Constraint::Length(alto_marcados));
+    }
+    restricciones.push(Constraint::Length(3));
+
     let chunks = Layout::default()
         .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(3), // cabecera
-            Constraint::Min(1),    // cuerpo
-            Constraint::Length(3), // pie de atajos
-        ])
+        .constraints(restricciones)
         .split(frame.area());
 
     draw_header(frame, app, chunks[0]);
     draw_body(frame, app, chunks[1]);
-    draw_footer(frame, chunks[2]);
+    if mostrar_marcados {
+        marked::draw(frame, app, chunks[2]);
+        draw_footer(frame, chunks[3]);
+    } else {
+        draw_footer(frame, chunks[2]);
+    }
 
     // El modal se dibuja al final para quedar POR ENCIMA del resto.
     modal::draw(frame, app);
@@ -198,6 +219,8 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
         lbl(" orden  "),
         theme::key("a"),
         lbl(" apar/disco  "),
+        theme::key("Spc"),
+        lbl(" marcar  "),
         theme::key("d"),
         lbl(" borrar  "),
         theme::key("f"),

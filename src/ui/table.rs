@@ -44,13 +44,15 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
         .map(|(pos, &idx)| {
             let node = &tree.nodes[idx];
             let seleccionada = pos == sel;
+            let marcada = app.is_marked(idx);
 
-            // Texto de cada columna.
-            let nombre = if node.is_dir {
+            // Texto de cada columna. Los elementos MARCADOS llevan un "●" delante.
+            let base = if node.is_dir {
                 format!("{}/", node.name)
             } else {
                 node.name.clone()
             };
+            let nombre = if marcada { format!("● {base}") } else { base };
             let pct = node.size as f64 / total_dir as f64 * 100.0;
 
             // Colores: en la fila seleccionada todo va en negro (lo aporta el

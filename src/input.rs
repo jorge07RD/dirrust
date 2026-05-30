@@ -49,8 +49,12 @@ pub fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         KeyCode::Char('a') => app.toggle_size_mode(),
         KeyCode::Char('r') => app.rescan(),
 
-        // --- Borrar: abre el modal de confirmación (no borra nada todavía) ---
+        // --- Marcar / desmarcar el elemento seleccionado ---
+        KeyCode::Char(' ') => app.toggle_mark(),
+
+        // --- Borrar: 'd' el seleccionado; 'D' (mayús) la lista de marcados ---
         KeyCode::Char('d') => app.open_delete_modal(),
+        KeyCode::Char('D') => app.open_batch_delete_modal(),
 
         // --- Vista de duplicados ---
         KeyCode::Char('f') => app.toggle_duplicates(),
@@ -97,10 +101,12 @@ fn handle_modal_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
     // Discriminamos el tipo de modal sin retener el préstamo de `app`.
     enum Tipo {
         Confirm,
+        Batch,
         Message,
     }
     let tipo = match &app.modal {
         Some(Modal::ConfirmDelete(_)) => Tipo::Confirm,
+        Some(Modal::ConfirmBatch(_)) => Tipo::Batch,
         Some(Modal::Message { .. }) => Tipo::Message,
         None => return,
     };
@@ -112,6 +118,13 @@ fn handle_modal_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         Tipo::Confirm => match code {
             KeyCode::Char('p') | KeyCode::Char('P') => app.confirm_trash(),
             KeyCode::Char('x') | KeyCode::Char('X') => app.confirm_permanent(),
+            KeyCode::Esc => app.close_modal(),
+            _ => {}
+        },
+        // Borrado por lotes de los marcados.
+        Tipo::Batch => match code {
+            KeyCode::Char('p') | KeyCode::Char('P') => app.confirm_batch(false),
+            KeyCode::Char('x') | KeyCode::Char('X') => app.confirm_batch(true),
             KeyCode::Esc => app.close_modal(),
             _ => {}
         },
