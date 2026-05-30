@@ -224,6 +224,9 @@ pub struct App {
     dedup_rx: Option<Receiver<DedupMsg>>,
     /// ¿Hay un cómputo de duplicados en marcha?
     pub dedup_running: bool,
+    /// Directorio (índice de nodo) para el que se calcularon los duplicados.
+    /// Permite recomputar al cambiar de directorio sin reusar un caché ajeno.
+    dedup_scope: Option<usize>,
     /// Lista plana de archivos duplicados seleccionables: (grupo, índice en grupo).
     pub dup_files: Vec<(usize, usize)>,
     /// Archivo seleccionado en la vista de duplicados (índice en `dup_files`).
@@ -272,6 +275,7 @@ impl App {
             dedup_groups: None,
             dedup_rx: None,
             dedup_running: false,
+            dedup_scope: None,
             dup_files: Vec::new(),
             dup_sel: 0,
             dup_list_state: ratatui::widgets::ListState::default(),
@@ -848,7 +852,10 @@ impl App {
                     return;
                 }
                 self.view = ViewMode::Duplicates;
-                if self.dedup_groups.is_none() && !self.dedup_running {
+                // Recomputamos si no hay resultado, o si el caché es de OTRO
+                // directorio (el ámbito de la búsqueda es el dir actual).
+                let ambito_obsoleto = self.dedup_scope != Some(self.current);
+                if (self.dedup_groups.is_none() || ambito_obsoleto) && !self.dedup_running {
                     self.start_dedup();
                 }
             }
@@ -856,21 +863,31 @@ impl App {
         }
     }
 
-    /// Lanza la detección de duplicados sobre todos los archivos del árbol.
+    /// Lanza la detección de duplicados sobre los archivos del directorio actual.
     fn start_dedup(&mut self) {
         let Some(files) = self.collect_files() else {
             return;
         };
-        self.dedup_rx = Some(dedup::spawn(files));
+        // Limpiamos el resultado anterior para que la UI muestre "calculando".
+        self.dedup_groups = None;
+        self.dup_files.clear();
+        self.dedup_scope = Some(self.current);
+        self.dedup_rx = Some(dedup::spawn(files, dedup::MIN_SIZE_PREDETERMINADO));
         self.dedup_running = true;
     }
 
-    /// Recolecta (ruta, tamaño) de todos los archivos del árbol escaneado.
+    /// Recolecta (ruta, tamaño) de los archivos del SUBÁRBOL del directorio
+    /// actual (no de todo el árbol): el ámbito de la búsqueda de duplicados es el
+    /// directorio que se está viendo. Recorre los descendientes con una pila.
     fn collect_files(&self) -> Option<Vec<(PathBuf, u64)>> {
         let tree = self.tree()?;
         let mut out = Vec::new();
-        for (idx, n) in tree.nodes.iter().enumerate() {
-            if !n.is_dir {
+        let mut pila = vec![self.current];
+        while let Some(idx) = pila.pop() {
+            let n = &tree.nodes[idx];
+            if n.is_dir {
+                pila.extend(n.children.iter().copied());
+            } else {
                 out.push((tree.path_of(idx, &self.root_path), n.size));
             }
         }
@@ -974,6 +991,7 @@ impl App {
         self.dedup_groups = None;
         self.dedup_rx = None;
         self.dedup_running = false;
+        self.dedup_scope = None;
         self.dup_files.clear();
         self.view = ViewMode::Main;
         // Los índices del árbol antiguo dejan de ser válidos: limpiamos marcas.

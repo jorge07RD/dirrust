@@ -20,7 +20,10 @@ use theme::{SEL_BG, SEL_FG};
 /// Dibuja la vista de duplicados en `area`.
 pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
     let recuperable = app.dup_total_recoverable();
-    let titulo = format!("duplicados — recuperable: {}", format_size(recuperable));
+    let titulo = format!(
+        "duplicados (dir actual) — recuperable: {}",
+        format_size(recuperable)
+    );
     let block = theme::panel(&titulo, true);
 
     // Estados sin lista que mostrar.
@@ -36,7 +39,8 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect) {
         return;
     };
     if groups.is_empty() {
-        let p = Paragraph::new("No se encontraron archivos duplicados. 🎉").block(block);
+        let p = Paragraph::new("No se encontraron duplicados (≥ 4 KiB) en este directorio. 🎉")
+            .block(block);
         frame.render_widget(p, area);
         return;
     }
