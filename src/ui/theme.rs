@@ -28,6 +28,9 @@ pub const BAD: Color = Color::Rgb(235, 80, 90);
 pub const SEL_BG: Color = Color::Rgb(0, 150, 175);
 /// Texto sobre la selección.
 pub const SEL_FG: Color = Color::Rgb(10, 14, 16);
+/// Fondo de resaltado suave (oscuro) que NO tapa el color del texto. Se usa, por
+/// ejemplo, para marcar en el desglose la extensión del archivo seleccionado.
+pub const HILITE_BG: Color = Color::Rgb(46, 60, 74);
 
 /// Construye un marco redondeado con el título al estilo btop.
 ///
