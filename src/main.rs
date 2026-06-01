@@ -75,6 +75,12 @@ struct Cli {
     /// Número de hilos de escaneo (0 = automático según los núcleos).
     #[arg(long, default_value_t = 0)]
     threads: usize,
+
+    /// Relanza la app con `sudo` (para leer archivos sin permiso). Usa la ruta
+    /// absoluta del propio binario, así que funciona aunque `~/.cargo/bin` no esté
+    /// en el PATH de sudo. Pedirá tu contraseña antes de entrar en la interfaz.
+    #[arg(long)]
+    sudo: bool,
 }
 
 impl Cli {
@@ -107,6 +113,15 @@ impl Cli {
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
+
+    // Auto-elevación: si se pidió `--sudo` y no somos ya root, nos relanzamos a
+    // través de sudo ANTES de montar la terminal (para que el prompt de
+    // contraseña salga con normalidad). `reejecutar_con_sudo` reemplaza el
+    // proceso, así que en el camino normal no vuelve de aquí.
+    if cli.sudo && !es_root() {
+        return reejecutar_con_sudo();
+    }
+
     let no_mouse = cli.no_mouse;
     let cushion = cli.cushion;
     let config = cli.into_scan_config()?;
@@ -127,6 +142,43 @@ fn main() -> Result<()> {
     // a un estado usable antes de imprimir cualquier error.
     restore_terminal(!no_mouse)?;
     result
+}
+
+extern "C" {
+    /// EUID del proceso (de libc). La declaramos directamente para no añadir la
+    /// dependencia `libc` solo por esto.
+    fn geteuid() -> u32;
+}
+
+/// ¿Estamos corriendo como root (EUID 0)?
+fn es_root() -> bool {
+    // SAFETY: `geteuid` no recibe punteros ni puede fallar; solo lee el EUID.
+    unsafe { geteuid() == 0 }
+}
+
+/// Relanza este mismo binario bajo `sudo`, usando su ruta ABSOLUTA (así sudo lo
+/// encuentra aunque su `secure_path` no incluya `~/.cargo/bin`). Reemplaza el
+/// proceso actual con `exec`: en el camino normal no retorna; solo devuelve `Err`
+/// si no se pudo lanzar sudo (p. ej. no está instalado).
+fn reejecutar_con_sudo() -> Result<()> {
+    use std::os::unix::process::CommandExt;
+
+    let exe =
+        std::env::current_exe().context("no se pudo determinar la ruta del propio ejecutable")?;
+    // Reconstruimos los argumentos del usuario QUITANDO `--sudo`, para no entrar
+    // en un bucle de re-ejecución una vez ya somos root.
+    let args: Vec<std::ffi::OsString> = std::env::args_os()
+        .skip(1)
+        .filter(|a| a != "--sudo")
+        .collect();
+
+    let err = std::process::Command::new("sudo")
+        .arg(exe)
+        .args(args)
+        .exec();
+    Err(anyhow::anyhow!(
+        "no se pudo relanzar con sudo (¿está instalado?): {err}"
+    ))
 }
 
 /// Guard RAII que garantiza la restauración de la terminal al destruirse.
