@@ -36,6 +36,18 @@ const PARCIAL: u64 = 64 * 1024;
 /// "duplicados" son ruido (apenas recuperan espacio) y solo ensucian la lista.
 pub const MIN_SIZE_PREDETERMINADO: u64 = 4 * 1024;
 
+/// Mínimo de elementos por tarea paralela. Con árboles enormes (decenas de miles
+/// de candidatos —típico en modo `--disk`, donde muchos archivos comparten el
+/// tamaño redondeado a bloques) un `par_iter` sin límite genera tantísimos
+/// sub-trabajos que el robo de trabajo de rayon ANIDA la recursión del puente
+/// productor/consumidor hasta desbordar la pila del worker. Agrupar el trabajo en
+/// lotes de este tamaño acota el troceado (y de paso va más rápido).
+const MIN_TRABAJO_PAR: usize = 256;
+
+/// Tamaño de la pila de cada worker del pool dedicado de duplicados (16 MiB).
+/// Holgura amplia frente a la recursión del iterador paralelo de rayon.
+const PILA_WORKER: usize = 16 * 1024 * 1024;
+
 /// Un grupo de archivos con contenido idéntico.
 #[derive(Debug, Clone)]
 pub struct DupGroup {
@@ -69,11 +81,26 @@ pub fn spawn(files: Vec<(PathBuf, u64)>, min_size: u64) -> Receiver<DedupMsg> {
     std::thread::Builder::new()
         .name("dirrust-dedup".into())
         .spawn(move || {
-            let grupos = find_duplicates(&files, min_size);
+            let grupos = en_pool_dedicado(&files, min_size);
             let _ = tx.send(DedupMsg::Done(grupos));
         })
         .expect("no se pudo crear el hilo de duplicados");
     rx
+}
+
+/// Ejecuta `find_duplicates` en un pool de rayon DEDICADO con pila amplia por
+/// worker. Con árboles enormes (p. ej. miles de archivos del mismo tamaño en modo
+/// `--disk`) el robo de trabajo de rayon anida mucho la recursión del iterador
+/// paralelo; una pila por worker más grande evita el desbordamiento de pila. Si el
+/// pool no se puede crear, caemos al pool global por defecto.
+fn en_pool_dedicado(files: &[(PathBuf, u64)], min_size: u64) -> Vec<DupGroup> {
+    match rayon::ThreadPoolBuilder::new()
+        .stack_size(PILA_WORKER)
+        .build()
+    {
+        Ok(pool) => pool.install(|| find_duplicates(files, min_size)),
+        Err(_) => find_duplicates(files, min_size),
+    }
 }
 
 /// Calcula los grupos de archivos duplicados a partir de (ruta, tamaño aprox).
@@ -107,6 +134,7 @@ pub fn find_duplicates(files: &[(PathBuf, u64)], min_size: u64) -> Vec<DupGroup>
     // bloques en modo disco) y descartamos lo ilegible.
     let stats: Vec<InfoArchivo> = candidatos
         .par_iter()
+        .with_min_len(MIN_TRABAJO_PAR)
         .filter_map(|p| stat_archivo(p, umbral))
         .collect();
 
@@ -136,6 +164,7 @@ pub fn find_duplicates(files: &[(PathBuf, u64)], min_size: u64) -> Vec<DupGroup>
     // Fase 2: hash parcial (64 KiB) de todos los candidatos en paralelo.
     let parciales: Vec<(u64, u64, PathBuf)> = a_hashear
         .par_iter()
+        .with_min_len(MIN_TRABAJO_PAR)
         .filter_map(|(size, p)| hash_file(p, PARCIAL).ok().map(|h| (*size, h, p.clone())))
         .collect();
 
@@ -156,6 +185,7 @@ pub fn find_duplicates(files: &[(PathBuf, u64)], min_size: u64) -> Vec<DupGroup>
 
     let mut grupos: Vec<DupGroup> = grupos_candidatos
         .par_iter()
+        .with_min_len(MIN_TRABAJO_PAR)
         .flat_map_iter(|(size, paths)| {
             particionar_identicos(paths)
                 .into_iter()
@@ -233,8 +263,12 @@ fn particionar_identicos(paths: &[PathBuf]) -> Vec<Vec<PathBuf>> {
 fn archivos_identicos(a: &Path, b: &Path) -> io::Result<bool> {
     let mut fa = std::fs::File::open(a)?;
     let mut fb = std::fs::File::open(b)?;
-    let mut ba = [0u8; 64 * 1024];
-    let mut bb = [0u8; 64 * 1024];
+    // Búferes en el HEAP (no en la pila): esta función se ejecuta en las HOJAS de
+    // la recursión paralela de rayon; dos arrays de 64 KiB por marco (128 KiB)
+    // dispararían el desbordamiento de pila del worker. En el heap el marco queda
+    // diminuto. (Esta fue una de las causas del crash en `--disk`.)
+    let mut ba = vec![0u8; 64 * 1024];
+    let mut bb = vec![0u8; 64 * 1024];
     loop {
         let na = leer_lleno(&mut fa, &mut ba)?;
         let nb = leer_lleno(&mut fb, &mut bb)?;
@@ -269,7 +303,9 @@ fn leer_lleno(f: &mut std::fs::File, buf: &mut [u8]) -> io::Result<usize> {
 fn hash_file(path: &Path, limit: u64) -> io::Result<u64> {
     let mut f = std::fs::File::open(path)?;
     let mut hasher = Xxh3::new();
-    let mut buf = [0u8; 64 * 1024];
+    // Búfer en el HEAP: ver la nota en `archivos_identicos` (evita marcos de pila
+    // grandes en las hojas de la recursión paralela de rayon).
+    let mut buf = vec![0u8; 64 * 1024];
     let mut leido: u64 = 0;
     while leido < limit {
         let n = f.read(&mut buf)?;
@@ -311,6 +347,32 @@ mod tests {
                 (e.path(), len)
             })
             .collect()
+    }
+
+    /// Regresión del desbordamiento de pila: con decenas de miles de archivos del
+    /// MISMO tamaño (el caso que disparaba el crash en modo `--disk`), el cómputo
+    /// debe completar sin desbordar la pila del worker de rayon. Va por la ruta de
+    /// producción (`spawn` → pool dedicado con pila de 16 MiB). Marcado `#[ignore]`
+    /// porque crea muchos archivos; ejecútalo con:
+    ///   cargo test --release estres -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn estres_muchos_archivos_mismo_tamano_no_desborda() {
+        let dir = dir_tmp("estres");
+        let datos = vec![b'q'; 4096]; // >= umbral de 4 KiB
+        let total = 50_000;
+        for i in 0..total {
+            escribir(&dir.join(format!("f{i}.bin")), &datos);
+        }
+
+        let rx = spawn(listar(&dir), 4096);
+        let DedupMsg::Done(grupos) = rx.recv().unwrap();
+
+        // Todos idénticos → un único grupo con los `total` archivos.
+        assert_eq!(grupos.len(), 1, "todos comparten contenido");
+        assert_eq!(grupos[0].paths.len(), total);
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]
