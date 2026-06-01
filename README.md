@@ -11,6 +11,24 @@ borrado seguro (papelera o permanente).
 
 ---
 
+## Capturas
+
+### Vista principal
+
+Tabla de ranking, desglose por extensión y *treemap* de colores del directorio
+analizado.
+
+![Vista principal de dirrust: tabla de ranking, desglose por extensión y treemap](assets/vista-principal.png)
+
+### Vista de duplicados
+
+Grupos de archivos con contenido idéntico detectados por hash, listos para
+borrado seguro (tecla `f`).
+
+![Vista de duplicados de dirrust](assets/vista-duplicados.png)
+
+---
+
 ## Características
 
 - **Escaneo paralelo** con [`jwalk`] en un hilo de fondo: la UI nunca se bloquea.
