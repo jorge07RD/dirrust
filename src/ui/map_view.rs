@@ -150,7 +150,7 @@ fn pintar_tile(buf: &mut Buffer, tree: &Tree, t: &MapTile) {
     }
     let nodo = &tree.nodes[t.node];
     let (x_txt, max_w) = zona_texto(r);
-    let nombre = truncar(&nodo.name, max_w);
+    let nombre = truncar(tree.name(t.node), max_w);
     let tam = tam_corto(nodo.size);
     let estilo_nombre = Style::default().fg(TEXTO).add_modifier(Modifier::BOLD);
     let estilo_tam = Style::default().fg(TEXTO_TENUE);
@@ -222,7 +222,7 @@ fn contorno(buf: &mut Buffer, tree: &Tree, t: &MapTile, color: Color) {
     let (x1, y1) = (r.right() - 1, r.bottom() - 1);
     // Zona de la fila superior ocupada por el nombre (no se pisa).
     let (x_txt, max_w) = zona_texto(r);
-    let w_nombre = truncar(&tree.nodes[t.node].name, max_w).chars().count() as u16;
+    let w_nombre = truncar(tree.name(t.node), max_w).chars().count() as u16;
     let estilo = Style::default().fg(color).add_modifier(Modifier::BOLD);
 
     let mut poner = |x: u16, y: u16, s: &str, solo_vacia: bool| {
@@ -314,7 +314,7 @@ fn seccion_seleccion(l: &mut Vec<Line>, app: &App, tree: &Tree, w: usize) {
     l.push(Line::from(vec![
         Span::styled("▌ ", Style::default().fg(rgb(cat.accent()))),
         Span::styled(
-            truncar(&n.name, w.saturating_sub(2)),
+            truncar(tree.name(sel), w.saturating_sub(2)),
             Style::default()
                 .fg(theme::TEXT)
                 .add_modifier(Modifier::BOLD),
@@ -447,7 +447,7 @@ fn seccion_marcados(l: &mut Vec<Line>, app: &App, tree: &Tree, w: usize) {
             continue;
         };
         let tam = tam_corto(nodo.size);
-        let nombre = truncar(&nodo.name, w.saturating_sub(tam.chars().count() + 5));
+        let nombre = truncar(tree.name(idx), w.saturating_sub(tam.chars().count() + 5));
         let hueco = w.saturating_sub(nombre.chars().count() + tam.chars().count() + 3);
         l.push(Line::from(vec![
             Span::styled("  ● ", Style::default().fg(MARCADO)),
@@ -591,7 +591,7 @@ fn ruta_relativa(tree: &Tree, node: usize, base: usize) -> String {
     let mut partes = Vec::new();
     let mut cur = node;
     while cur != base {
-        partes.push(tree.nodes[cur].name.as_str());
+        partes.push(tree.name(cur));
         match tree.nodes[cur].parent {
             Some(p) => cur = p,
             None => break,

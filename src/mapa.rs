@@ -144,7 +144,7 @@ pub fn clasificar(tree: &Tree, idx: usize, padre: Categoria) -> Categoria {
     let propia = if nodo.is_dir {
         regla_dir(tree, idx, padre)
     } else if padre == Categoria::Otros {
-        regla_ext(nodo.extension.as_deref())
+        regla_ext(tree.ext(idx))
     } else {
         None
     };
@@ -176,7 +176,7 @@ fn tiene_hijo(tree: &Tree, idx: usize, nombres: &[&str]) -> bool {
     tree.nodes[idx]
         .children
         .iter()
-        .any(|&c| nombres.contains(&tree.nodes[c].name.as_str()))
+        .any(|&c| nombres.contains(&tree.name(c)))
 }
 
 /// Ficheros que delatan la raíz de un proyecto de código.
@@ -197,7 +197,7 @@ const MARCAS_PROYECTO: &[&str] = &[
 
 /// Regla por nombre para directorios.
 fn regla_dir(tree: &Tree, idx: usize, padre: Categoria) -> Option<Categoria> {
-    let nombre = tree.nodes[idx].name.to_lowercase();
+    let nombre = tree.name(idx).to_lowercase();
     let n = nombre.as_str();
 
     if matches!(n, "trash" | ".trash" | "$recycle.bin") || n.starts_with(".trash-") {
@@ -531,15 +531,15 @@ mod tests {
         //   .cache/ 300
         //   foto.jpg 100
         let mut t = Tree::with_root(Path::new("/home/u"), true, 0);
-        let proj = t.add_child(t.root, "proj".into(), true, 0, None);
-        t.add_child(proj, "Cargo.toml".into(), false, 10, Some("toml".into()));
-        let src = t.add_child(proj, "src".into(), true, 0, None);
-        t.add_child(src, "main.rs".into(), false, 90, Some("rs".into()));
-        let target = t.add_child(proj, "target".into(), true, 0, None);
-        t.add_child(target, "bin".into(), false, 800, None);
-        let cache = t.add_child(t.root, ".cache".into(), true, 0, None);
-        t.add_child(cache, "x".into(), false, 300, None);
-        let foto = t.add_child(t.root, "foto.jpg".into(), false, 100, Some("jpg".into()));
+        let proj = t.add_child(t.root, "proj", true, 0);
+        t.add_child(proj, "Cargo.toml", false, 10);
+        let src = t.add_child(proj, "src", true, 0);
+        t.add_child(src, "main.rs", false, 90);
+        let target = t.add_child(proj, "target", true, 0);
+        t.add_child(target, "bin", false, 800);
+        let cache = t.add_child(t.root, ".cache", true, 0);
+        t.add_child(cache, "x", false, 300);
+        let foto = t.add_child(t.root, "foto.jpg", false, 100);
         t.aggregate();
         (t, target, cache, foto)
     }

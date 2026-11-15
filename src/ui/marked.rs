@@ -39,13 +39,13 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
         let color = if node.is_dir {
             theme::ACCENT
         } else {
-            let (r, g, b) = palette_rgb(node.extension.as_deref());
+            let (r, g, b) = palette_rgb(tree.ext(idx));
             Color::Rgb(r, g, b)
         };
         let nombre = if node.is_dir {
-            format!("{}/", node.name)
+            format!("{}/", tree.name(idx))
         } else {
-            node.name.clone()
+            tree.name(idx).to_string()
         };
         lineas.push(Line::from(vec![
             Span::styled("● ", Style::default().fg(theme::WARN)),

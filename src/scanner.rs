@@ -16,7 +16,7 @@ use std::sync::Arc;
 use crossbeam_channel::{Receiver, Sender};
 use jwalk::WalkDirGeneric;
 
-use crate::model::{extension_of, Tree};
+use crate::model::Tree;
 
 /// Cómo medimos el tamaño de cada archivo.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -61,10 +61,14 @@ pub enum ScanMsg {
     Error(String),
 }
 
-/// Cada cuánto, como mucho, enviamos un snapshot parcial del árbol a la UI.
-/// REVISAR (concurrencia): el snapshot clona + agrega el árbol, así que es O(n);
-/// lo limitamos por TIEMPO para acotar su coste a medida que el árbol crece.
-const SNAPSHOT_CADA: std::time::Duration = std::time::Duration::from_millis(400);
+/// Intervalo MÍNIMO entre snapshots parciales del árbol enviados a la UI.
+/// REVISAR (concurrencia): un snapshot es una copia O(n) del árbol. Además de
+/// este mínimo, esperamos `SNAPSHOT_FACTOR` veces lo que costó la última copia,
+/// de modo que copiar nunca se lleve más de ~1/SNAPSHOT_FACTOR del escaneo
+/// aunque el árbol tenga millones de nodos.
+const SNAPSHOT_MIN: std::time::Duration = std::time::Duration::from_millis(400);
+/// Proporción mínima entre tiempo escaneando y tiempo copiando snapshots.
+const SNAPSHOT_FACTOR: u32 = 10;
 
 /// Lanza el escaneo en un hilo de fondo y devuelve el extremo receptor del canal.
 ///
@@ -87,7 +91,7 @@ pub fn spawn(config: ScanConfig) -> Receiver<ScanMsg> {
 
 /// Cuerpo del escaneo (ejecutado ya en el hilo de fondo).
 fn run_scan(config: ScanConfig, tx: Sender<ScanMsg>) {
-    // Validamos la raíz antes de nada para dar un error claro.
+    // Metadata de la raíz: para saber si es un directorio y su dispositivo.
     let root_meta = match std::fs::symlink_metadata(&config.root) {
         Ok(m) => m,
         Err(e) => {
@@ -99,25 +103,23 @@ fn run_scan(config: ScanConfig, tx: Sender<ScanMsg>) {
         }
     };
 
-    // Dispositivo de la raíz: necesario para `--one-file-system` (no cruzar
-    // montajes). Comparamos el `st_dev` de cada hijo contra este valor.
+    // Dispositivo de la raíz, para --one-file-system.
     let root_dev = device_id(&root_meta);
 
-    // Contador de entradas omitidas, compartido con el closure de poda de jwalk.
+    // Contador compartido de entradas omitidas (errores de permisos, etc.).
     let skipped = Arc::new(AtomicU64::new(0));
 
-    // Construimos el árbol. Si la raíz es un archivo suelto, el árbol tiene un
-    // único nodo; si es un directorio, jwalk lo recorre.
     let is_dir = root_meta.is_dir();
     let root_own = own_size(&root_meta, config.size_mode);
     let mut tree = Tree::with_root(&config.root, is_dir, if is_dir { 0 } else { root_own });
 
-    if is_dir {
-        build_tree(&config, &mut tree, root_dev, &skipped, &tx);
+    // Si la UI cerró el canal, abortamos sin más.
+    if is_dir && !build_tree(&config, &mut tree, root_dev, &skipped, &tx) {
+        return;
     }
 
-    // Agregación bottom-up una sola vez (ver model::Tree::aggregate).
-    tree.aggregate();
+    // El árbol ya está agregado (agregación incremental): solo compactamos.
+    tree.shrink();
 
     let _ = tx.send(ScanMsg::Done {
         tree: Box::new(tree),
@@ -125,149 +127,137 @@ fn run_scan(config: ScanConfig, tx: Sender<ScanMsg>) {
     });
 }
 
-/// Recorre el directorio raíz con jwalk y va poblando el arena.
+/// Estado por entrada que calculan los hilos de jwalk: el tamaño propio del
+/// archivo (0 en directorios o si su metadata falló).
+type Walk = WalkDirGeneric<((), u64)>;
+
+/// Recorre el directorio raíz con jwalk y va poblando el arena. Devuelve
+/// `false` si la UI cerró el canal (hay que abortar).
+///
+/// REVISAR (rendimiento), las tres claves de la velocidad:
+///   1. La metadata (`stat`) de cada archivo se lee en `process_read_dir`, que
+///      jwalk ejecuta EN PARALELO en sus hilos; este hilo solo recibe el
+///      tamaño ya calculado en `client_state`.
+///   2. jwalk entrega las entradas en orden PRIMERO EN PROFUNDIDAD (preorden),
+///      así que el padre de una entrada de profundidad `d` es el último
+///      directorio visto a profundidad `d - 1`: basta una pila, sin construir
+///      ni hashear la ruta completa de cada entrada.
+///   3. El tamaño se suma a los ancestros al insertar (agregación incremental),
+///      así el árbol siempre está agregado y un snapshot es una copia plana.
 fn build_tree(
     config: &ScanConfig,
     tree: &mut Tree,
     root_dev: u64,
     skipped: &Arc<AtomicU64>,
     tx: &Sender<ScanMsg>,
-) {
-    // Mapa ruta -> índice de nodo. jwalk garantiza que un directorio se anuncia
-    // ANTES que su contenido (no puede listar hijos sin abrir el directorio),
-    // por lo que el padre siempre existe en el mapa cuando llega un hijo.
-    let mut index: std::collections::HashMap<PathBuf, usize> = std::collections::HashMap::new();
-    index.insert(config.root.clone(), tree.root);
+) -> bool {
+    // pila[d] = índice del último directorio visto a profundidad d.
+    let mut pila: Vec<usize> = vec![tree.root];
 
-    // Acumuladores para el progreso; emitimos cada `PROGRESS_EVERY` archivos.
+    // Cada cuántos archivos enviamos progreso (y valoramos un snapshot).
     const PROGRESS_EVERY: u64 = 4096;
     let mut files: u64 = 0;
     let mut bytes: u64 = 0;
     let mut since_last: u64 = 0;
-    // Marca temporal del último snapshot parcial enviado.
     let mut last_snapshot = std::time::Instant::now();
+    let mut espera_snapshot = SNAPSHOT_MIN;
 
     let size_mode = config.size_mode;
     let one_fs = config.one_file_system;
     let skipped_walk = Arc::clone(skipped);
 
-    // REVISAR: concurrencia / poda. Usamos `process_read_dir` para podar en el
-    // propio jwalk (antes de descender) los subárboles que cruzan a otro sistema
-    // de archivos cuando `--one-file-system` está activo, y para contar las
-    // lecturas de directorio que fallan por permisos. Podar aquí evita gastar
-    // hilos descendiendo en ramas que vamos a descartar.
-    let walk = WalkDirGeneric::<((), ())>::new(&config.root)
+    let walk = Walk::new(&config.root)
         .follow_links(config.follow_symlinks)
         .skip_hidden(false)
         .parallelism(parallelism(config.threads))
         .process_read_dir(move |_depth, _path, _state, children| {
-            for child in children.iter() {
-                // Una entrada `Err` aquí significa que no pudimos leer algo de
-                // este directorio (típicamente permisos): lo contamos.
-                if child.is_err() {
-                    skipped_walk.fetch_add(1, Ordering::Relaxed);
-                }
-            }
-            if one_fs {
-                children.retain(|res| match res {
-                    Ok(entry) => {
-                        // Solo podamos directorios en otro dispositivo; los
-                        // archivos sueltos no inician descenso de todos modos.
-                        if entry.file_type.is_dir() {
-                            match entry.metadata() {
-                                Ok(m) => device_id(&m) == root_dev,
-                                // Si no podemos leer metadata, conservamos la
-                                // entrada y dejamos que el bucle principal decida.
-                                Err(_) => true,
-                            }
-                        } else {
-                            true
+            // Se ejecuta en los hilos de jwalk, una vez por directorio leído.
+            children.retain_mut(|res| {
+                let entry = match res {
+                    Ok(e) => e,
+                    Err(_) => {
+                        skipped_walk.fetch_add(1, Ordering::Relaxed);
+                        return false;
+                    }
+                };
+                if entry.file_type.is_dir() {
+                    // --one-file-system: no descendemos a otros dispositivos.
+                    if one_fs {
+                        if let Ok(m) = entry.metadata() {
+                            return device_id(&m) == root_dev;
                         }
                     }
-                    Err(_) => true, // los errores ya se contaron arriba
-                });
-            }
+                } else {
+                    match entry.metadata() {
+                        Ok(m) => entry.client_state = own_size(&m, size_mode),
+                        Err(_) => {
+                            skipped_walk.fetch_add(1, Ordering::Relaxed);
+                        }
+                    }
+                }
+                true
+            });
         });
 
     for entry in walk {
         let entry = match entry {
             Ok(e) => e,
             Err(_) => {
-                // Error al producir esta entrada (permiso al hacer stat, etc.).
                 skipped.fetch_add(1, Ordering::Relaxed);
                 continue;
             }
         };
-
-        let path = entry.path();
-        // La raíz ya está en el árbol; jwalk también la emite con depth 0.
-        if path == config.root {
+        // jwalk devuelve también la raíz (profundidad 0); ya está en el árbol.
+        let depth = entry.depth;
+        if depth == 0 {
             continue;
         }
 
-        let is_dir = entry.file_type.is_dir();
-
-        // El padre debe existir ya en el mapa por el orden de jwalk. Si por
-        // algún motivo no está (rama podada, symlink raro), omitimos la entrada.
-        let parent_path = entry.parent_path();
-        let Some(&parent_idx) = index.get(parent_path) else {
+        // Padre = último directorio visto a profundidad depth - 1.
+        let Some(&parent_idx) = pila.get(depth - 1) else {
             skipped.fetch_add(1, Ordering::Relaxed);
             continue;
         };
 
-        // Tamaño propio: solo los archivos aportan bytes; los directorios suman 0
-        // (su tamaño se agrega desde los hijos).
-        let own = if is_dir {
-            0
-        } else {
-            match entry.metadata() {
-                Ok(m) => own_size(&m, size_mode),
-                Err(_) => {
-                    skipped.fetch_add(1, Ordering::Relaxed);
-                    0
-                }
-            }
-        };
-
-        let name = entry.file_name().to_string_lossy().into_owned();
-        let ext = extension_of(&path, is_dir);
-        let idx = tree.add_child(parent_idx, name, is_dir, own, ext);
+        let is_dir = entry.file_type.is_dir();
+        let own = entry.client_state;
+        let name = entry.file_name.to_string_lossy();
+        let idx = tree.add_child(parent_idx, &name, is_dir, own);
 
         if is_dir {
-            index.insert(path, idx);
+            pila.truncate(depth);
+            pila.push(idx);
         } else {
+            tree.add_to_ancestors(idx, own, 1);
             files += 1;
             bytes += own;
             since_last += 1;
             if since_last >= PROGRESS_EVERY {
                 since_last = 0;
-                // Si la UI cerró el canal, dejamos de escanear.
                 if tx.send(ScanMsg::Progress { files, bytes }).is_err() {
-                    return;
+                    return false;
                 }
-                // Snapshot parcial throttled por tiempo: clonamos el árbol,
-                // lo agregamos y lo enviamos para el refresco en vivo.
-                if last_snapshot.elapsed() >= SNAPSHOT_CADA {
+                if last_snapshot.elapsed() >= espera_snapshot {
+                    // El árbol ya está agregado: el snapshot es una copia plana.
+                    let t = std::time::Instant::now();
+                    let snap = Box::new(tree.clone());
+                    espera_snapshot = SNAPSHOT_MIN.max(t.elapsed() * SNAPSHOT_FACTOR);
                     last_snapshot = std::time::Instant::now();
-                    let mut snap = tree.clone();
-                    snap.aggregate();
-                    if tx
-                        .send(ScanMsg::Partial {
-                            tree: Box::new(snap),
-                            files,
-                            bytes,
-                        })
-                        .is_err()
-                    {
-                        return;
+                    let msg = ScanMsg::Partial {
+                        tree: snap,
+                        files,
+                        bytes,
+                    };
+                    if tx.send(msg).is_err() {
+                        return false;
                     }
                 }
             }
         }
     }
 
-    // Un último progreso con las cifras finales antes del `Done`.
-    let _ = tx.send(ScanMsg::Progress { files, bytes });
+    // Progreso final para que la UI muestre las cifras definitivas.
+    tx.send(ScanMsg::Progress { files, bytes }).is_ok()
 }
 
 /// Convierte el número de hilos de la CLI al ajuste de jwalk.
@@ -350,5 +340,77 @@ mod tests {
     fn write_bytes(path: &std::path::Path, n: usize) {
         let mut f = std::fs::File::create(path).unwrap();
         f.write_all(&vec![b'x'; n]).unwrap();
+    }
+
+    /// Tamaño recursivo calculado con `std::fs` (referencia independiente).
+    fn du(path: &std::path::Path) -> (u64, u64) {
+        let m = std::fs::symlink_metadata(path).unwrap();
+        if !m.is_dir() {
+            return (m.len(), 1);
+        }
+        let (mut s, mut n) = (0, 0);
+        for e in std::fs::read_dir(path).unwrap() {
+            let (a, b) = du(&e.unwrap().path());
+            s += a;
+            n += b;
+        }
+        (s, n)
+    }
+
+    #[test]
+    fn padres_y_agregados_coinciden_con_el_disco() {
+        // Árbol con hermanos que intercalan archivos y carpetas a varias
+        // profundidades: si la pila de padres se equivocara, algún nodo
+        // colgaría del directorio equivocado y su ruta no existiría.
+        let dir = std::env::temp_dir().join(format!("dirrust_pila_{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut k = 1usize;
+        for a in 0..4 {
+            for b in 0..3 {
+                for c in 0..3 {
+                    let d = dir
+                        .join(format!("a{a}"))
+                        .join(format!("b{b}"))
+                        .join(format!("c{c}"));
+                    std::fs::create_dir_all(&d).unwrap();
+                    write_bytes(&d.join(format!("f{k}.Bin")), k * 7);
+                    k += 1;
+                }
+                write_bytes(&dir.join(format!("a{a}")).join(format!("b{b}.txt")), k);
+                k += 1;
+            }
+            std::fs::create_dir_all(dir.join(format!("a{a}")).join("vacia")).unwrap();
+        }
+
+        let rx = spawn(ScanConfig {
+            root: dir.clone(),
+            follow_symlinks: false,
+            one_file_system: true,
+            size_mode: SizeMode::Apparent,
+            threads: 0,
+        });
+        let tree = loop {
+            match rx.recv().unwrap() {
+                ScanMsg::Done { tree, .. } => break tree,
+                ScanMsg::Error(e) => panic!("escaneo falló: {e}"),
+                _ => continue,
+            }
+        };
+
+        for idx in 0..tree.nodes.len() {
+            let ruta = tree.path_of(idx, &dir);
+            let meta = std::fs::symlink_metadata(&ruta)
+                .unwrap_or_else(|_| panic!("ruta inexistente: {}", ruta.display()));
+            let n = &tree.nodes[idx];
+            assert_eq!(n.is_dir, meta.is_dir(), "{}", ruta.display());
+            assert_eq!((n.size, n.file_count), du(&ruta), "{}", ruta.display());
+        }
+        // Las extensiones se guardan en minúsculas.
+        let f = tree
+            .find_by_path(&dir, &dir.join("a0/b0/c0/f1.Bin"))
+            .unwrap();
+        assert_eq!(tree.ext(f), Some("bin"));
+
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }

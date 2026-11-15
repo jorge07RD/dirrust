@@ -342,20 +342,16 @@ impl App {
                 // Tamaño desc; a igualdad, nombre asc para un orden estable.
                 hijos.sort_by(|&a, &b| {
                     nodes[b].size.cmp(&nodes[a].size).then_with(|| {
-                        nodes[a]
-                            .name
+                        tree.name(a)
                             .to_lowercase()
-                            .cmp(&nodes[b].name.to_lowercase())
+                            .cmp(&tree.name(b).to_lowercase())
                     })
                 });
             }
             SortKey::Name => {
-                hijos.sort_by(|&a, &b| {
-                    nodes[a]
-                        .name
-                        .to_lowercase()
-                        .cmp(&nodes[b].name.to_lowercase())
-                });
+                // Clave cacheada: pasa a minúsculas cada nombre UNA vez, no en
+                // cada comparación (importa en directorios con miles de hijos).
+                hijos.sort_by_cached_key(|&a| tree.name(a).to_lowercase());
             }
             SortKey::Files => {
                 hijos.sort_by(|&a, &b| {
@@ -838,7 +834,9 @@ impl App {
         };
 
         // Recorremos el subárbol con una pila (sin recursión) sumando por extensión.
-        let mut acc: std::collections::HashMap<Option<String>, (u64, u64)> =
+        // La clave toma prestada la extensión internada del árbol: sin reservar
+        // memoria por archivo.
+        let mut acc: std::collections::HashMap<Option<&str>, (u64, u64)> =
             std::collections::HashMap::new();
         let mut pila = vec![self.current];
         while let Some(idx) = pila.pop() {
@@ -846,7 +844,7 @@ impl App {
             if n.is_dir {
                 pila.extend(n.children.iter().copied());
             } else {
-                let e = acc.entry(n.extension.clone()).or_insert((0, 0));
+                let e = acc.entry(tree.ext(idx)).or_insert((0, 0));
                 e.0 += n.size;
                 e.1 += 1;
             }
@@ -854,7 +852,11 @@ impl App {
 
         let mut v: Vec<ExtAgg> = acc
             .into_iter()
-            .map(|(ext, (size, count))| ExtAgg { ext, size, count })
+            .map(|(ext, (size, count))| ExtAgg {
+                ext: ext.map(str::to_string),
+                size,
+                count,
+            })
             .collect();
         v.sort_by_key(|a| std::cmp::Reverse(a.size));
         self.breakdown = v;
@@ -1253,7 +1255,7 @@ mod tests {
         let nombres: Vec<String> = app
             .sorted_children()
             .iter()
-            .map(|&i| app.tree().unwrap().nodes[i].name.clone())
+            .map(|&i| app.tree().unwrap().name(i).to_string())
             .collect();
         assert_eq!(nombres, vec!["big.bin", "mid", "small.txt"]);
 
@@ -1266,14 +1268,13 @@ mod tests {
         // Entrar en 'mid' (índice 1) sí navega.
         app.selected = 1;
         app.enter_selected();
-        let dir_actual = &app.tree().unwrap().nodes[app.current];
-        assert_eq!(dir_actual.name, "mid");
+        assert_eq!(app.tree().unwrap().name(app.current), "mid");
 
         // Dentro de mid: m1 (200) antes que m2 (50).
         let dentro: Vec<String> = app
             .sorted_children()
             .iter()
-            .map(|&i| app.tree().unwrap().nodes[i].name.clone())
+            .map(|&i| app.tree().unwrap().name(i).to_string())
             .collect();
         assert_eq!(dentro, vec!["m1", "m2"]);
 
@@ -1287,7 +1288,7 @@ mod tests {
                     .children
                     .iter()
                     .copied()
-                    .find(|&i| app.tree().unwrap().nodes[i].name == "mid")
+                    .find(|&i| app.tree().unwrap().name(i) == "mid")
                     .unwrap()
             )
         );
