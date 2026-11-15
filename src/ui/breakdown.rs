@@ -35,7 +35,7 @@ pub fn draw(frame: &mut Frame, app: &App, area: Rect) {
             if node.is_dir {
                 None
             } else {
-                Some(node.extension.clone())
+                Some(tree.ext(n).map(str::to_string))
             }
         })
     });

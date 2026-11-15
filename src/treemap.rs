@@ -314,7 +314,7 @@ fn rellenar_recursivo(
         let color = if nodo.is_dir {
             DIR_SOLIDO
         } else {
-            palette_rgb(nodo.extension.as_deref())
+            palette_rgb(tree.ext(node))
         };
         pintar_rect(layout, &rect, color, cushion);
     }
@@ -396,9 +396,9 @@ mod tests {
     fn squarify_reparte_proporcional_y_cubre_el_area() {
         // root/ con tres archivos de tamaños 600 / 300 / 100.
         let mut tree = Tree::with_root(Path::new("/root"), true, 0);
-        let a = tree.add_child(tree.root, "a.bin".into(), false, 600, Some("bin".into()));
-        let b = tree.add_child(tree.root, "b.bin".into(), false, 300, Some("bin".into()));
-        let _c = tree.add_child(tree.root, "c.bin".into(), false, 100, Some("bin".into()));
+        let a = tree.add_child(tree.root, "a.bin", false, 600);
+        let b = tree.add_child(tree.root, "b.bin", false, 300);
+        let _c = tree.add_child(tree.root, "c.bin", false, 100);
         tree.aggregate();
         assert_eq!(tree.total_size(), 1000);
 

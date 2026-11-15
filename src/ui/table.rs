@@ -48,9 +48,9 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
 
             // Texto de cada columna. Los elementos MARCADOS llevan un "●" delante.
             let base = if node.is_dir {
-                format!("{}/", node.name)
+                format!("{}/", tree.name(idx))
             } else {
-                node.name.clone()
+                tree.name(idx).to_string()
             };
             let nombre = if marcada { format!("● {base}") } else { base };
             let pct = node.size as f64 / total_dir as f64 * 100.0;
@@ -65,7 +65,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
             } else if node.is_dir {
                 (DIR_FG, SIZE_FG)
             } else {
-                let (r, g, b) = palette_rgb(node.extension.as_deref());
+                let (r, g, b) = palette_rgb(tree.ext(idx));
                 (Color::Rgb(r, g, b), SIZE_FG)
             };
 

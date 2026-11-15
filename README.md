@@ -213,9 +213,18 @@ los grupos de duplicados, para comparar con lo que muestra `dirrust`.
 
 ## Detalles de implementación
 
-- **Árbol-arena**: los nodos viven en un `Vec` y se referencian por índice
-  `usize` (cache-friendly, sin `Rc<RefCell>`).
-- **Agregación O(n)** bottom-up apoyada en la invariante "padre antes que hijo".
+- **Árbol-arena compacto**: los nodos (72 bytes) viven en un `Vec` y se
+  referencian por índice `usize`. Los nombres van en un único buffer de texto
+  compartido y las extensiones se internan como un id, sin reservas de memoria
+  por nodo.
+- **Escaneo paralelo de verdad**: el `stat` de cada archivo se hace en los hilos
+  de [`jwalk`] (`process_read_dir`). El padre de cada entrada se deduce con una
+  pila por profundidad (jwalk entrega en preorden), sin construir rutas.
+- **Agregación incremental**: cada archivo suma su tamaño a sus ancestros al
+  insertarse, así que el árbol siempre está agregado y los snapshots en vivo
+  son copias planas. Se espacian a 10× lo que cuesta cada copia, para que nunca
+  pesen más de ~10 % del escaneo. Un home de 2,1 M de entradas se escanea en
+  ~1,2 s.
 - **Concurrencia** vía `crossbeam-channel` entre el hilo de escaneo / duplicados y
   el hilo de UI.
 - Los puntos sensibles del código están marcados con `// REVISAR:` (borrado,

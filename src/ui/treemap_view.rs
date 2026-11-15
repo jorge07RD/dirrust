@@ -29,7 +29,7 @@ pub fn draw(frame: &mut Frame, app: &mut App, area: Rect, focused: bool) {
     let titulo = match (app.tree(), app.hover_node) {
         (Some(tree), Some(h)) if h < tree.nodes.len() => {
             let n = &tree.nodes[h];
-            format!("treemap — {} ({})", n.name, format_size(n.size))
+            format!("treemap — {} ({})", tree.name(h), format_size(n.size))
         }
         _ => "treemap".to_string(),
     };
