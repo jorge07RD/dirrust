@@ -116,6 +116,7 @@ dirrust --cushion --threads 8 /datos
 | `d` | Borrar el elemento seleccionado (abre confirmación) |
 | `D` | Borrar TODOS los elementos marcados (lote) |
 | `f` | Ver la lista de duplicados |
+| `t` | Alternar entre la vista clásica y el modo mapa |
 | `r` | Re-escanear |
 | `q`, `Ctrl-C` | Salir |
 
@@ -133,6 +134,25 @@ dirrust --cushion --threads 8 /datos
 | `↑`/`↓` o `j`/`k` | Mover entre archivos duplicados |
 | `d` | Borrar el archivo seleccionado (flujo de borrado seguro) |
 | `f` / `Esc` | Volver a la vista principal |
+
+### Modo mapa (`t`)
+
+Treemap a pantalla completa con el nombre y el tamaño escritos en cada tile,
+coloreado por **categoría** (código, toolchains, git, multimedia, documentos,
+agentes…) en vez de por extensión. Lo **recuperable** (cachés, papelera y
+salidas de build como `target/` o `node_modules/`) aparece **rayado** `╱`. El
+panel lateral muestra la selección, una lista *«vale la pena mirar»* con lo
+recuperable del directorio actual (de mayor a menor), los marcados y el
+espacio libre del disco.
+
+| Tecla / gesto | Acción |
+|---|---|
+| `h` `j` `k` `l` / flechas | Moverse al tile vecino en esa dirección |
+| `Tab` / `Shift-Tab` | Siguiente / anterior por tamaño |
+| `Enter` / doble clic | Entrar al directorio |
+| `Retroceso`, `Esc` / clic derecho | Subir un nivel |
+| `Espacio`, `d`, `D` | Marcar, borrar, borrar marcados (igual que en la vista clásica) |
+| `t` | Volver a la vista clásica |
 
 ---
 

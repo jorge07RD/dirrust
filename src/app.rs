@@ -15,6 +15,7 @@ use ratatui::layout::Rect;
 
 use crate::actions::{self, DeleteMode};
 use crate::dedup::{self, DedupMsg, DupGroup};
+use crate::mapa::{self, Categoria, MapTile};
 use crate::model::Tree;
 use crate::scanner::{ScanConfig, ScanMsg, SizeMode};
 use crate::treemap::TileRect;
@@ -37,6 +38,8 @@ pub enum ViewMode {
     Main,
     /// Vista de duplicados.
     Duplicates,
+    /// Mapa a pantalla completa con etiquetas y colores por categoría.
+    Map,
 }
 
 /// Ventana temporal para considerar dos clics como un doble clic.
@@ -239,6 +242,18 @@ pub struct App {
 
     /// Conjunto de nodos MARCADOS (por índice) para borrarlos por lotes después.
     pub marked: HashSet<usize>,
+
+    // --- Modo mapa ---
+    /// Vista "base" a la que se vuelve al salir de duplicados (Main o Map).
+    pub base_view: ViewMode,
+    /// Área (en celdas) donde se dibuja el mapa (para hit-testing).
+    pub map_area: Rect,
+    /// Tiles del último mapa dibujado, en orden de pintado (padres primero).
+    pub map_tiles: Vec<MapTile>,
+    /// Para qué directorio está calculada la lista "vale la pena mirar".
+    worth_for: Option<usize>,
+    /// Carpetas recuperables del directorio actual, de mayor a menor.
+    pub worth: Vec<(usize, Categoria)>,
 }
 
 impl App {
@@ -281,6 +296,11 @@ impl App {
             dup_list_state: ratatui::widgets::ListState::default(),
             cushion: false,
             marked: HashSet::new(),
+            base_view: ViewMode::Main,
+            map_area: Rect::default(),
+            map_tiles: Vec::new(),
+            worth_for: None,
+            worth: Vec::new(),
         }
     }
 
@@ -494,7 +514,7 @@ impl App {
             return;
         }
         let prompt = match self.view {
-            ViewMode::Main => self.delete_prompt_for_selected(),
+            ViewMode::Main | ViewMode::Map => self.delete_prompt_for_selected(),
             ViewMode::Duplicates => self.delete_prompt_for_dup(),
         };
         if let Some(p) = prompt {
@@ -621,6 +641,7 @@ impl App {
         }
         // El desglose por extensión ya no es válido tras cambiar el árbol.
         self.breakdown_for = None;
+        self.worth_for = None;
     }
 
     // --- Lista de marcados (multi-selección para borrado por lotes) ---
@@ -846,7 +867,7 @@ impl App {
     /// vez, lanza el cómputo en segundo plano.
     pub fn toggle_duplicates(&mut self) {
         match self.view {
-            ViewMode::Main => {
+            ViewMode::Main | ViewMode::Map => {
                 // La detección de duplicados necesita el árbol completo.
                 if !self.scan_complete() {
                     return;
@@ -859,7 +880,106 @@ impl App {
                     self.start_dedup();
                 }
             }
-            ViewMode::Duplicates => self.view = ViewMode::Main,
+            ViewMode::Duplicates => self.view = self.base_view,
+        }
+    }
+
+    // --- Modo mapa ---
+
+    /// Alterna entre la vista clásica (tabla + treemap) y el mapa. Desde la vista
+    /// de duplicados vuelve a la vista base contraria.
+    pub fn toggle_map(&mut self) {
+        self.base_view = match self.base_view {
+            ViewMode::Map => ViewMode::Main,
+            _ => ViewMode::Map,
+        };
+        self.view = self.base_view;
+        // El hover de una vista no significa lo mismo en la otra.
+        self.hover_node = None;
+    }
+
+    /// Recalcula la lista "vale la pena mirar" si está obsoleta.
+    pub fn ensure_worth(&mut self) {
+        if self.worth_for == Some(self.current) && self.tree().is_some() {
+            return;
+        }
+        let v = match self.tree() {
+            Some(tree) => mapa::vale_la_pena(tree, self.current, 12),
+            None => Vec::new(),
+        };
+        self.worth = v;
+        self.worth_for = Some(self.current);
+    }
+
+    /// Tile más profundo del mapa bajo la celda (col, row).
+    pub fn map_tile_at(&self, col: u16, row: u16) -> Option<MapTile> {
+        if !dentro(self.map_area, col, row) {
+            return None;
+        }
+        self.map_tiles
+            .iter()
+            .rev()
+            .find(|t| dentro(t.rect, col, row))
+            .copied()
+    }
+
+    /// Hijo directo del directorio actual que contiene a `node` (o él mismo).
+    pub fn top_level_of(&self, node: usize) -> Option<usize> {
+        let tree = self.tree()?;
+        let mut cur = node;
+        loop {
+            let parent = tree.nodes.get(cur)?.parent?;
+            if parent == self.current {
+                return Some(cur);
+            }
+            cur = parent;
+        }
+    }
+
+    /// Mueve la selección del mapa hacia el tile de primer nivel más cercano en
+    /// la dirección (dx, dy) — cada componente en {-1, 0, 1}.
+    ///
+    /// REVISAR: navegación espacial. Se elige el candidato cuyo centro esté en
+    /// esa dirección minimizando distancia principal + 2·desvío lateral. Las
+    /// filas cuentan doble para compensar que una celda es más alta que ancha.
+    pub fn map_move(&mut self, dx: i32, dy: i32) {
+        let tops: Vec<MapTile> = self
+            .map_tiles
+            .iter()
+            .filter(|t| t.depth == 0)
+            .copied()
+            .collect();
+        if tops.is_empty() {
+            return;
+        }
+        let centro = |t: &MapTile| {
+            (
+                t.rect.x as f64 + t.rect.width as f64 / 2.0,
+                (t.rect.y as f64 + t.rect.height as f64 / 2.0) * 2.0,
+            )
+        };
+        let sel = self.selected_node();
+        let Some(actual) = tops.iter().find(|t| Some(t.node) == sel) else {
+            self.select_node(tops[0].node);
+            return;
+        };
+        let (cx, cy) = centro(actual);
+        let mejor = tops
+            .iter()
+            .filter(|t| t.node != actual.node)
+            .filter_map(|t| {
+                let (x, y) = centro(t);
+                let (ddx, ddy) = (x - cx, y - cy);
+                let principal = ddx * dx as f64 + ddy * dy as f64;
+                if principal <= 0.0 {
+                    return None;
+                }
+                let lateral = if dx != 0 { ddy.abs() } else { ddx.abs() };
+                Some((principal + 2.0 * lateral, t.node))
+            })
+            .min_by(|a, b| a.0.total_cmp(&b.0));
+        if let Some((_, n)) = mejor {
+            self.select_node(n);
         }
     }
 
@@ -988,12 +1108,14 @@ impl App {
         // El árbol cambia: invalidamos desglose y duplicados y volvemos a la
         // vista principal.
         self.breakdown_for = None;
+        self.worth_for = None;
         self.dedup_groups = None;
         self.dedup_rx = None;
         self.dedup_running = false;
         self.dedup_scope = None;
         self.dup_files.clear();
-        self.view = ViewMode::Main;
+        self.view = self.base_view;
+        self.map_tiles.clear();
         // Los índices del árbol antiguo dejan de ser válidos: limpiamos marcas.
         self.marked.clear();
     }
@@ -1029,6 +1151,7 @@ impl App {
                             tree: Some(tree),
                         };
                         self.breakdown_for = None;
+                        self.worth_for = None;
                     }
                 }
                 Ok(ScanMsg::Done { tree, skipped }) => {
@@ -1043,6 +1166,7 @@ impl App {
                         self.current = 0;
                     }
                     self.breakdown_for = None;
+                    self.worth_for = None;
                     let len = self.sorted_children().len();
                     self.selected = self.selected.min(len.saturating_sub(1));
                     break;

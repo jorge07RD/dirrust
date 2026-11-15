@@ -8,6 +8,7 @@ mod actions;
 mod app;
 mod dedup;
 mod input;
+mod mapa;
 mod model;
 mod scanner;
 mod treemap;

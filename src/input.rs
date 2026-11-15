@@ -22,6 +22,12 @@ pub fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
         return;
     }
 
+    // El mapa mueve la selección en 2D (hjkl / flechas).
+    if app.view == ViewMode::Map {
+        handle_map_key(app, code, mods);
+        return;
+    }
+
     match code {
         // --- Salir ---
         KeyCode::Char('q') => app.should_quit = true,
@@ -58,6 +64,41 @@ pub fn handle_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
 
         // --- Vista de duplicados ---
         KeyCode::Char('f') => app.toggle_duplicates(),
+
+        // --- Cambiar al modo mapa ---
+        KeyCode::Char('t') => app.toggle_map(),
+
+        _ => {}
+    }
+}
+
+/// Teclado en el modo mapa: hjkl/flechas mueven por el plano, ⏎ entra, ⌫ sube.
+fn handle_map_key(app: &mut App, code: KeyCode, mods: KeyModifiers) {
+    match code {
+        KeyCode::Char('q') => app.should_quit = true,
+        KeyCode::Char('c') if mods.contains(KeyModifiers::CONTROL) => app.should_quit = true,
+
+        // Movimiento espacial entre los tiles de primer nivel.
+        KeyCode::Left | KeyCode::Char('h') => app.map_move(-1, 0),
+        KeyCode::Right | KeyCode::Char('l') => app.map_move(1, 0),
+        KeyCode::Up | KeyCode::Char('k') => app.map_move(0, -1),
+        KeyCode::Down | KeyCode::Char('j') => app.map_move(0, 1),
+        // Tab / Shift-Tab recorren por tamaño (del mayor al menor).
+        KeyCode::Tab => app.move_selection(1),
+        KeyCode::BackTab => app.move_selection(-1),
+        KeyCode::Char('g') => app.select_first(),
+        KeyCode::Char('G') => app.select_last(),
+
+        KeyCode::Enter => app.enter_selected(),
+        KeyCode::Backspace | KeyCode::Esc => app.go_up(),
+
+        KeyCode::Char('a') => app.toggle_size_mode(),
+        KeyCode::Char('r') => app.rescan(),
+        KeyCode::Char(' ') => app.toggle_mark(),
+        KeyCode::Char('d') => app.open_delete_modal(),
+        KeyCode::Char('D') => app.open_batch_delete_modal(),
+        KeyCode::Char('f') => app.toggle_duplicates(),
+        KeyCode::Char('t') => app.toggle_map(),
 
         _ => {}
     }
@@ -143,6 +184,10 @@ pub fn handle_mouse(app: &mut App, me: MouseEvent) {
         return;
     }
     let (col, row) = (me.column, me.row);
+    if app.view == ViewMode::Map {
+        handle_map_mouse(app, me);
+        return;
+    }
     match me.kind {
         // Clic izquierdo: seleccionar; doble clic: entrar al directorio.
         MouseEventKind::Down(MouseButton::Left) => {
@@ -174,6 +219,35 @@ pub fn handle_mouse(app: &mut App, me: MouseEvent) {
             app.hover_node = app.treemap_node_at(col, row);
         }
 
+        _ => {}
+    }
+}
+
+/// Mouse en el modo mapa: clic selecciona el tile de primer nivel que contiene
+/// al apuntado, doble clic entra, la rueda recorre por tamaño y el hover
+/// resalta el tile más profundo bajo el cursor.
+fn handle_map_mouse(app: &mut App, me: MouseEvent) {
+    let (col, row) = (me.column, me.row);
+    match me.kind {
+        MouseEventKind::Down(MouseButton::Left) => {
+            let doble = app.register_click(col, row);
+            let Some(tile) = app.map_tile_at(col, row) else {
+                return;
+            };
+            if let Some(top) = app.top_level_of(tile.node) {
+                app.select_node(top);
+                if doble {
+                    app.enter_selected();
+                }
+            }
+        }
+        // Clic derecho: subir un nivel (atajo cómodo para explorar con el mouse).
+        MouseEventKind::Down(MouseButton::Right) => app.go_up(),
+        MouseEventKind::ScrollDown => app.move_selection(1),
+        MouseEventKind::ScrollUp => app.move_selection(-1),
+        MouseEventKind::Moved => {
+            app.hover_node = app.map_tile_at(col, row).map(|t| t.node);
+        }
         _ => {}
     }
 }

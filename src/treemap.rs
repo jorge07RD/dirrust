@@ -27,11 +27,11 @@ const PROF_MAX: u32 = 14;
 
 /// Rectángulo en coordenadas de píxel (en punto flotante para repartir sin sesgo).
 #[derive(Debug, Clone, Copy)]
-struct RectF {
-    x: f64,
-    y: f64,
-    w: f64,
-    h: f64,
+pub(crate) struct RectF {
+    pub(crate) x: f64,
+    pub(crate) y: f64,
+    pub(crate) w: f64,
+    pub(crate) h: f64,
 }
 
 impl RectF {
@@ -141,7 +141,7 @@ pub fn build(
 /// Hijos de un nodo con tamaño > 0, ordenados por tamaño descendente.
 ///
 /// El squarify EXIGE entrada ordenada de mayor a menor para dar buenos aspectos.
-fn hijos_ordenados(tree: &Tree, node: usize) -> Vec<usize> {
+pub(crate) fn hijos_ordenados(tree: &Tree, node: usize) -> Vec<usize> {
     let mut v: Vec<usize> = tree.nodes[node]
         .children
         .iter()
@@ -158,7 +158,7 @@ fn hijos_ordenados(tree: &Tree, node: usize) -> Vec<usize> {
 /// largo del lado más CORTO del rectángulo libre; añadimos tiles a la fila
 /// mientras la peor relación de aspecto MEJORE, y cuando empeora cerramos la
 /// fila, consumimos esa franja del rectángulo y seguimos con el espacio restante.
-fn squarify_node(
+pub(crate) fn squarify_node(
     tree: &Tree,
     hijos: &[usize],
     rect: RectF,

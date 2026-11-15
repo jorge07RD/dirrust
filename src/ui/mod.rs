@@ -7,6 +7,7 @@
 
 mod breakdown;
 mod duplicates;
+mod map_view;
 mod marked;
 mod modal;
 mod table;
@@ -34,7 +35,8 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     // El panel de marcados solo ocupa espacio si hay algo marcado: es "esbelto"
     // y desaparece por completo cuando la lista está vacía.
     let (n_marcados, _) = app.marked_summary();
-    let mostrar_marcados = n_marcados > 0 && app.tree().is_some();
+    // En el modo mapa los marcados ya se listan en el panel lateral.
+    let mostrar_marcados = n_marcados > 0 && app.tree().is_some() && app.view != ViewMode::Map;
     let alto_marcados = if mostrar_marcados {
         (n_marcados.min(MARCADOS_MAX_FILAS) as u16) + 2 // + bordes
     } else {
@@ -56,9 +58,9 @@ pub fn draw(frame: &mut Frame, app: &mut App) {
     draw_body(frame, app, chunks[1]);
     if mostrar_marcados {
         marked::draw(frame, app, chunks[2]);
-        draw_footer(frame, chunks[3]);
+        draw_footer(frame, app.view, chunks[3]);
     } else {
-        draw_footer(frame, chunks[2]);
+        draw_footer(frame, app.view, chunks[2]);
     }
 
     // El modal se dibuja al final para quedar POR ENCIMA del resto.
@@ -123,6 +125,18 @@ fn draw_header(frame: &mut Frame, app: &App, area: Rect) {
             Style::default().fg(theme::ACCENT),
         ),
         Span::raw(" "),
+        Span::styled(
+            format!(
+                "[vista: {}]",
+                match app.view {
+                    ViewMode::Main => "clásica",
+                    ViewMode::Map => "mapa",
+                    ViewMode::Duplicates => "duplicados",
+                }
+            ),
+            Style::default().fg(theme::ACCENT),
+        ),
+        Span::raw(" "),
         estado,
     ]);
 
@@ -138,6 +152,11 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
         // La vista de duplicados ocupa todo el cuerpo (solo con escaneo completo).
         if app.view == ViewMode::Duplicates {
             duplicates::draw(frame, app, area);
+            return;
+        }
+        // Modo mapa: treemap etiquetado a pantalla completa + panel de detalle.
+        if app.view == ViewMode::Map {
+            map_view::draw(frame, app, area);
             return;
         }
         // Vista principal: fila superior (tabla + desglose) y treemap debajo.
@@ -204,8 +223,37 @@ fn draw_body(frame: &mut Frame, app: &mut App, area: Rect) {
 }
 
 /// Pie con los atajos, con teclas resaltadas al estilo btop.
-fn draw_footer(frame: &mut Frame, area: Rect) {
+fn draw_footer(frame: &mut Frame, view: ViewMode, area: Rect) {
     let lbl = |t: &'static str| Span::styled(t, Style::default().fg(theme::DIM));
+    if view == ViewMode::Map {
+        let atajos = Line::from(vec![
+            theme::key("hjkl"),
+            lbl(" mover  "),
+            theme::key("Tab"),
+            lbl(" siguiente  "),
+            theme::key("⏎"),
+            lbl(" entrar  "),
+            theme::key("⌫"),
+            lbl(" subir  "),
+            theme::key("Spc"),
+            lbl(" marcar  "),
+            theme::key("d"),
+            lbl(" borrar  "),
+            theme::key("t"),
+            lbl(" vista clásica  "),
+            theme::key("f"),
+            lbl(" duplicados  "),
+            theme::key("a"),
+            lbl(" apar/disco  "),
+            theme::key("r"),
+            lbl(" rescan  "),
+            theme::key("q"),
+            lbl(" salir"),
+        ]);
+        let footer = Paragraph::new(atajos).block(theme::panel("atajos", false));
+        frame.render_widget(footer, area);
+        return;
+    }
     let atajos = Line::from(vec![
         theme::key("↑↓"),
         lbl(" mover  "),
@@ -225,6 +273,8 @@ fn draw_footer(frame: &mut Frame, area: Rect) {
         lbl(" borrar  "),
         theme::key("f"),
         lbl(" duplicados  "),
+        theme::key("t"),
+        lbl(" mapa  "),
         theme::key("r"),
         lbl(" rescan  "),
         theme::key("q"),
